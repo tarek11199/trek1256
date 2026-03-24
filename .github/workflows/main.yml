@@ -3,6 +3,16 @@ name: "macOS RustDesk - Full Suite & Antidetect Browsers"
 on:
   workflow_dispatch:
     inputs:
+      macos_version:
+        description: "Select macOS Version"
+        required: true
+        default: "macos-15"
+        type: choice
+        options:
+          - "macos-latest"
+          - "macos-15"
+          - "macos-15-intel"
+          - "macos-14"
       RUSTDESK_PASSWORD:
         description: "Set a custom RustDesk password"
         default: "password123"
@@ -10,8 +20,8 @@ on:
 
 jobs:
   rustdesk:
-    name: "🚀 Full Access macOS Runner"
-    runs-on: macos-14
+    name: "🚀 Full Access Runner"
+    runs-on: ${{ github.event.inputs.macos_version }}
 
     steps:
       - name: "👤 Create Admin Account"
@@ -49,7 +59,8 @@ jobs:
           sudo hdiutil detach /Volumes/Chrome\ Remote\ Desktop* -force
           echo "✅ CRD installed"
 
-      - name: "🌐 Install MostLogin"
+      - name: "🌐 Install MostLogin (macOS 14 Only)"
+        if: github.event.inputs.macos_version == 'macos-14'
         run: |
           URL="https://downsoft.mostlogin.com/MostLogin-arm64-setup.dmg"
           curl -L -o /tmp/mostlogin.dmg "$URL"
@@ -57,9 +68,11 @@ jobs:
           MOUNT_PATH=$(ls /Volumes | grep -i "MostLogin" | head -n 1)
           sudo cp -R "/Volumes/$MOUNT_PATH/MostLogin.app" /Applications/
           sudo hdiutil detach "/Volumes/$MOUNT_PATH" -force
-          echo "✅ MostLogin installed"
+          sleep 2
+          echo "✅ MostLogin installed on macOS 14"
 
-      - name: "🦊 Install GoLogin"
+      - name: "🦊 Install GoLogin (macOS 14 Only)"
+        if: github.event.inputs.macos_version == 'macos-14'
         run: |
           URL="https://dl.gologin.com/gologin-arm64.dmg"
           curl -L -o /tmp/gologin.dmg "$URL"
@@ -67,9 +80,10 @@ jobs:
           MOUNT_PATH=$(ls /Volumes | grep -i "GoLogin" | head -n 1)
           sudo cp -R "/Volumes/$MOUNT_PATH/GoLogin.app" /Applications/
           sudo hdiutil detach "/Volumes/$MOUNT_PATH" -force
-          echo "✅ GoLogin installed"
+          sleep 2
+          echo "✅ GoLogin installed on macOS 14"
 
-      - name: "🔓 SQLite3 Permission Injection"
+      - name: "🔓 SQLite3 Permission Injection (Anti-Lock Fix)"
         run: |
           RUSTDESK="com.carriez.rustdesk"
           CRD_HOST="com.google.chromeremotedesktop.me2me-host"
@@ -77,21 +91,40 @@ jobs:
           MOSTLOGIN="com.mostlogin.browser"
           
           SERVICES=("kTCCServiceScreenCapture" "kTCCServiceAccessibility" "kTCCServicePostEvent")
-          APPS=("$RUSTDESK" "$CRD_HOST" "$GOLOGIN" "$MOSTLOGIN")
+          APPS=("$RUSTDESK" "$CRD_HOST")
+          
+          # Add extra apps to the list only if we are on macOS 14
+          if [[ "${{ github.event.inputs.macos_version }}" == "macos-14" ]]; then
+            APPS+=("$GOLOGIN" "$MOSTLOGIN")
+          fi
           
           SYS_TCC="/Library/Application Support/com.apple.TCC/TCC.db"
           USER_TCC="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
-          mkdir -p "$(dirname "$USER_TCC")"
+          
+          sudo launchctl stop com.apple.tccd || true
+          sudo killall -9 tccd || true
+          sleep 1
 
           for DB in "$SYS_TCC" "$USER_TCC"; do
+            sudo mkdir -p "$(dirname "$DB")"
+            if [ ! -f "$DB" ]; then sudo touch "$DB"; fi
+
             for APP in "${APPS[@]}"; do
               for SERVICE in "${SERVICES[@]}"; do
-                sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('$SERVICE', '$APP', 0, 2, 4, 1, 0, strftime('%s','now'));"
+                for i in {1..10}; do
+                  if sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('$SERVICE', '$APP', 0, 2, 4, 1, 0, strftime('%s','now'));"; then
+                    break
+                  else
+                    echo "⚠️ $DB locked... retrying ($i/10)"
+                    sleep 1
+                  fi
+                done
               done
             done
           done
-          sudo killall -9 tccd || true
-          echo "✅ Permissions injected for all apps"
+          
+          sudo launchctl start com.apple.tccd || true
+          echo "✅ Permissions injected"
 
       - name: "🚀 Start RustDesk & Force Global Password"
         run: |
@@ -107,34 +140,36 @@ jobs:
 
       - name: "📸 Capture Initial ID"
         run: |
-          echo "⏳ Waiting for ID..."
-          sleep 20
+          echo "⏳ Waiting for ID generation..."
+          sleep 30
           screencapture -x /tmp/id.png
           URL=$(curl -s -F "reqtype=fileupload" -F "fileToUpload=@/tmp/id.png" https://catbox.moe/user/api.php)
-          echo "IMAGE_URL=$URL" >> $GITHUB_ENV
           echo "------------------------------------------------------"
-          echo "🔗 RUSTDESK ID: $URL"
+          echo "🔗 RUSTDESK ID IMAGE: $URL"
           echo "🔑 PASS: ${{ github.event.inputs.RUSTDESK_PASSWORD }}"
           echo "👤 ADMIN: admin | PASS: 123456"
           echo "------------------------------------------------------"
 
-      - name: "🔄 Connection Loop"
+      - name: "🔄 Connection Loop & Heartbeat"
         run: |
           PREVIOUS_STATE="off"
           while true; do
             CONN_COUNT=$(netstat -an | grep ESTABLISHED | grep -Ei "\.21116|\.21117" | wc -l)
             if [ "$CONN_COUNT" -gt 0 ]; then
-                [ "$PREVIOUS_STATE" == "off" ] && echo "🌐 [$(date)] Connected" && PREVIOUS_STATE="on"
+                if [ "$PREVIOUS_STATE" == "off" ]; then
+                    echo "🌐 [$(date)] Connection established."
+                    PREVIOUS_STATE="on"
+                fi
             else
                 if [ "$PREVIOUS_STATE" == "on" ]; then
-                    echo "⚠️ Refreshing session..."
+                    echo "⚠️ Session disconnected. Refreshing..."
                     open -a "RustDesk"
-                    sleep 5
+                    sleep 10
                     screencapture -x /tmp/refresh.png
                     NEW_URL=$(curl -s -F "reqtype=fileupload" -F "fileToUpload=@/tmp/refresh.png" https://catbox.moe/user/api.php)
-                    echo "📸 NEW ID: $NEW_URL"
+                    echo "📸 NEW ID SCREENSHOT: $NEW_URL"
                     PREVIOUS_STATE="off"
                 fi
             fi
-            sleep 15
+            sleep 25
           done
